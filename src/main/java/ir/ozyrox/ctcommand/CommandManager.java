@@ -171,7 +171,10 @@ public class CommandManager {
                 return true;
             }
 
-            hasPermission(instance, method, sender);
+            if(!hasPermission(instance, method, sender)) {
+                instance.onNoPermission(sender);
+                return true;
+            }
 
             String cooldownKey = rootCommand.name() + ":" + subCommand.value();
             if (isOnCooldown(sender, cooldownKey, subCommand.cooldown(), instance)) {
