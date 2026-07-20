@@ -69,7 +69,10 @@ public class CommandManager {
                     return true;
                 }
 
-                hasPermission(instance, method, sender);
+                // Check for permissions
+                if (!hasPermission(instance, method, sender)) {
+                    return true;
+                }
 
                 // Check player is on cooldown or not
                 if (isOnCooldown(sender, cmd.name(), cmd.cooldown(), instance)) {
@@ -200,7 +203,7 @@ public class CommandManager {
         });
     }
 
-    private void hasPermission(CommandBase instance, Method method, CommandSender sender) {
+    private boolean hasPermission(CommandBase instance, Method method, CommandSender sender) {
         // Get required permissions
         HasPermission[] subCommandPermissions = getAnnotations(method, HasPermission.class);
         boolean hasSubCommandPermission = true;
@@ -216,6 +219,8 @@ public class CommandManager {
         if (!hasSubCommandPermission) {
             instance.onNoPermission(sender);
         }
+
+        return hasSubCommandPermission;
     }
 
     private Method findCompleter(Class<?> clazz, String name) {
