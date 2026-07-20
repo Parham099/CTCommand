@@ -71,6 +71,7 @@ public class CommandManager {
 
                 // Check for permissions
                 if (!hasPermission(instance, method, sender)) {
+                    instance.onNoPermission(sender);
                     return true;
                 }
 
@@ -213,11 +214,6 @@ public class CommandManager {
                     hasSubCommandPermission = false;
                 }
             }
-        }
-
-        // If player has not permission
-        if (!hasSubCommandPermission) {
-            instance.onNoPermission(sender);
         }
 
         return hasSubCommandPermission;
