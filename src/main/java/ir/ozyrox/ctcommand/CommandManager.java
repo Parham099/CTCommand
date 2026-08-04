@@ -20,6 +20,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -88,6 +89,7 @@ public class CommandManager {
             CommandData commandData = new CommandData(
                     cmd.name(),
                     method,
+                    method.getParameters(),
                     completerMethod,
                     getPermissions(hasPermission),
                     playerOnly,
@@ -127,7 +129,7 @@ public class CommandManager {
                     return true;
                 }
 
-                invoke(instance, data.getMethod(), sender, args);
+                invoke(instance, data.getMethod(), data.getParameters(), "", sender, args);
                 return true;
             });
 
@@ -168,6 +170,7 @@ public class CommandManager {
                 SubCommandData subCommandData = new SubCommandData(
                         subCommand.value(),
                         method,
+                        method.getParameters(),
                         completerMethod,
                         getPermissions(hasPermission),
                         playerOnly,
@@ -189,6 +192,7 @@ public class CommandManager {
 
         CommandData commandData = new CommandData(
                 rootCommand.name(),
+                null,
                 null,
                 null,
                 getPermissions(hasPermission),
@@ -267,7 +271,12 @@ public class CommandManager {
                 return true;
             }
 
-            invoke(instance, subCommandData.getMethod(), sender, remainingArgs);
+            invoke(instance,
+                    subCommandData.getMethod(),
+                    subCommandData.getParameters(),
+                    subCommandData.getUsage(), sender,
+                    remainingArgs
+            );
             return true;
         });
 
@@ -332,14 +341,81 @@ public class CommandManager {
         }
     }
 
-    private void invoke(CommandBase instance, Method method, CommandSender sender, String[] args) {
+    private void invoke(
+            CommandBase instance,
+            Method method,
+            Parameter[] parameters,
+            String usage,
+            CommandSender sender,
+            String[] args
+    ) {
         try {
-            method.invoke(instance, sender, args);
+            Object[] invokeArgs = new Object[parameters.length];
+
+            int argIndex = 0;
+
+            for (int i = 0; i < parameters.length; i++) {
+                Class<?> type = parameters[i].getType();
+
+                if (type == CommandSender.class) {
+                    invokeArgs[i] = sender;
+                    continue;
+                } else if (type == String[].class) {
+                    invokeArgs[i] = args;
+                    continue;
+                }
+
+                if (argIndex < args.length) {
+                    invokeArgs[i] = resolveArgument(
+                            type,
+                            args[argIndex++]
+                    );
+                }
+            }
+
+            method.invoke(instance, invokeArgs);
+        } catch (IllegalArgumentException e) {
+            instance.onInvalidUsage(sender, usage);
         } catch (ReflectiveOperationException e) {
             sender.sendMessage("An internal error occurred.");
             plugin.getLogger().severe("Failed to execute /" + method.getName());
             e.printStackTrace();
         }
+    }
+
+    private Object resolveArgument(
+            Class<?> type,
+            String argument
+    ) {
+        if (type == String.class) {
+            return argument;
+        }
+
+        if (type == boolean.class || type == Boolean.class) {
+            if (!argument.equalsIgnoreCase("true")
+                    && !argument.equalsIgnoreCase("false")) {
+                throw new IllegalArgumentException();
+            }
+
+            return Boolean.parseBoolean(argument);
+        }
+
+        if (type == int.class || type == Integer.class) {
+            return Integer.parseInt(argument);
+        }
+
+        if (type == float.class || type == Float.class) {
+            return Float.parseFloat(argument);
+        }
+
+        if (type == double.class || type == Double.class) {
+            return Double.parseDouble(argument);
+        }
+
+
+        throw new IllegalArgumentException(
+                "Unsupported argument type: " + type.getName()
+        );
     }
 
     private boolean isOnCooldown(CommandSender sender, String cooldownKey, int cooldownSeconds, CommandBase instance) {
