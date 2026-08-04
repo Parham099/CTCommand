@@ -41,7 +41,7 @@ Add the dependency:
 <dependency>
     <groupId>com.github.ozyrox086</groupId>
     <artifactId>ctcommand</artifactId>
-    <version>v1.2.1</version>
+    <version>v1.2.2</version>
 </dependency>
 ```
 
