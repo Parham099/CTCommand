@@ -5,6 +5,8 @@ A lightweight annotation-based command framework for Paper/Folia/Spigot plugins.
 ## Features
 
 * Class-based command registration
+* **Automatic command class discovery — no manual `register()` calls needed**
+* **Automatic runtime registration — no `plugin.yml` command entries needed**
 * Simple commands using `@DefaultCommand`
 * Subcommands using `@SubCommand`
 * **Automatic command argument parsing based on method parameter types**
@@ -41,7 +43,7 @@ Add the dependency:
 <dependency>
     <groupId>com.github.ozyrox086</groupId>
     <artifactId>ctcommand</artifactId>
-    <version>v1.2.1</version>
+    <version>v1.3.0</version>
 </dependency>
 ```
 
@@ -75,7 +77,43 @@ mvn clean package
 
 ## Getting started
 
-### 1. Register the manager in your plugin's `onEnable`
+### The easy way: auto-discovery, no `plugin.yml` needed
+
+`CommandManager#registerAll()` scans your plugin's package for every class that extends `CommandBase` and is annotated with `@Command`, instantiates each one (they need a no-args constructor), and registers it — including creating the command at runtime if it isn't declared in `plugin.yml`.
+
+```java
+@Override
+public void onEnable() {
+    CommandManager manager = new CommandManager(this);
+    manager.registerAll(); // finds and registers TeleportCommand, EconomyCommand, etc. automatically
+}
+
+@Override
+public void onDisable() {
+    manager.unregisterAll(); // cleans up dynamically-created commands, avoids duplicates on /reload
+}
+```
+
+That's it — no manual `register()` calls, no `commands:` section in `plugin.yml`. If you want a nicer `/help` entry or aliases for a runtime-created command, set them on `@Command`:
+
+```java
+@Command(name = "tp", description = "Teleport to a player", aliases = {"teleport"})
+@PlayerOnly
+public class TeleportCommand extends CommandBase {
+    @DefaultCommand
+    public void teleport(CommandSender sender, String player) { /* ... */ }
+}
+```
+
+By default `registerAll()` only scans your plugin's own package (fast, and won't touch shaded libraries). Pass a package explicitly to widen or narrow the scan:
+
+```java
+manager.registerAll("com.example.myplugin.commands");
+```
+
+### The manual way
+
+You can still register commands one by one and/or declare them in `plugin.yml` — both keep working exactly as before, and take priority over auto-registration/auto-creation for the same command:
 
 ```java
 @Override
@@ -87,8 +125,6 @@ public void onEnable() {
 }
 ```
 
-### 2. Declare each command in `plugin.yml`
-
 ```yaml
 commands:
   tp:
@@ -96,6 +132,8 @@ commands:
   eco:
     description: Manage economy
 ```
+
+If a command is declared in `plugin.yml`, `ctcommand` uses that entry (and its description/aliases) as-is; `@Command(description = ..., aliases = ...)` is only applied when the command has to be created at runtime.
 
 ## Command Arguments
 
@@ -121,20 +159,20 @@ public class GiveCommand extends CommandBase {
 When the user runs:
 
 ```text
-/give Parham 100
+/give Example 100
 ```
 
 `ctcommand` automatically maps the arguments to the method parameters:
 
 ```text
-player -> "Parham"
+player -> "Example"
 amount -> 100
 ```
 
 The framework effectively invokes the method as if you had written:
 
 ```java
-execute(sender, "Parham", 100);
+execute(sender, "Example", 100);
 ```
 
 You no longer need to manually access:
@@ -152,7 +190,7 @@ The framework currently supports:
 
 | Type                  | Example          |
 | --------------------- | ---------------- |
-| `String`              | `"Parham"`       |
+| `String`              | `"Example"`       |
 | `int` / `Integer`     | `100`            |
 | `float` / `Float`     | `10.5`           |
 | `double` / `Double`   | `10.5`           |
@@ -176,13 +214,13 @@ public void execute(
 A command such as:
 
 ```text
-/example Parham 100 1.5 true
+/example Example 100 1.5 true
 ```
 
 is automatically converted into:
 
 ```text
-String  -> "Parham"
+String  -> "Example"
 int     -> 100
 double  -> 1.5
 boolean -> true
@@ -204,7 +242,7 @@ public void execute(CommandSender sender, String player, int amount) {
 If the user enters:
 
 ```text
-/give Parham abc
+/give Example abc
 ```
 
 `abc` cannot be converted to an `int`, so the method is not executed.
@@ -244,14 +282,14 @@ public void execute(CommandSender sender, String player, int amount) {
 For example:
 
 ```text
-/give Parham 100
+/give Example 100
 ```
 
 is mapped as:
 
 ```text
 sender -> CommandSender
-player -> "Parham"
+player -> "Example"
 amount -> 100
 ```
 
@@ -319,13 +357,13 @@ public class TeleportCommand extends CommandBase {
 Running:
 
 ```text
-/tp Parham
+/tp Example
 ```
 
 automatically passes:
 
 ```java
-"Parham"
+"Example"
 ```
 
 to the `player` parameter.
@@ -394,14 +432,14 @@ public class EconomyCommand extends CommandBase {
 For:
 
 ```text
-/eco give Parham 100
+/eco give Example 100
 ```
 
 the framework automatically resolves:
 
 ```text
 CommandSender -> sender
-"Parham"      -> String player
+"Example"      -> String player
 "100"         -> int amount
 ```
 
@@ -413,10 +451,12 @@ Running `/eco` with no arguments, or an unknown subcommand, triggers `onInvalidU
 
 ### `@Command`
 
-| Parameter  | Default      | Description                           |
-| ---------- | ------------ | ------------------------------------- |
-| `name`     | — (required) | Command name, must match `plugin.yml` |
-| `cooldown` | `0`          | Cooldown in seconds (players only)    |
+| Parameter     | Default      | Description                                                                          |
+| ------------- | ------------ | ------------------------------------------------------------------------------------- |
+| `name`        | — (required) | Command name. Matches a `plugin.yml` entry if one exists; otherwise created at runtime. |
+| `cooldown`    | `0`          | Cooldown in seconds (players only)                                                    |
+| `description` | `""`         | Used only when the command isn't in `plugin.yml` and has to be created at runtime.    |
+| `aliases`     | `{}`         | Used only when the command isn't in `plugin.yml` and has to be created at runtime.    |
 
 ### `@SubCommand`
 
@@ -540,6 +580,8 @@ If you don't override them, sensible defaults from `CommandBase` are used automa
 
 ## How it works
 
+* `registerAll()` scans the plugin's classes for `@Command`-annotated `CommandBase` subclasses and registers them automatically.
+* A command not declared in `plugin.yml` is created at runtime via the server's command map — no `commands:` section required.
 * `@Command` is placed on command classes.
 * `@DefaultCommand` marks the executor for simple commands.
 * `@SubCommand` creates child commands under a root command.
@@ -588,13 +630,13 @@ public class ExampleCommand extends CommandBase {
 The command:
 
 ```text
-/example Parham 100 1.5 true
+/example Example 100 1.5 true
 ```
 
 is automatically converted to:
 
 ```text
-name       = "Parham"
+name       = "Example"
 amount     = 100
 multiplier = 1.5
 enabled    = true

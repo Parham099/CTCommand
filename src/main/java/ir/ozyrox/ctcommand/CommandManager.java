@@ -12,18 +12,28 @@ import ir.ozyrox.ctcommand.models.CommandData;
 import ir.ozyrox.ctcommand.models.CooldownEntry;
 import ir.ozyrox.ctcommand.models.SubCommandData;
 import org.bukkit.Bukkit;
+import org.bukkit.command.CommandMap;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.ConsoleCommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Player;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.File;
+import java.io.IOException;
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
+import java.net.URL;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.stream.Collectors;
 
 public class CommandManager {
@@ -31,10 +41,63 @@ public class CommandManager {
 
     private final Map<UUID, Map<String, CooldownEntry>> cooldowns = new ConcurrentHashMap<>();
     private final Map<String, CommandData> commands = new ConcurrentHashMap<>();
+    private final Set<String> dynamicallyRegistered = new HashSet<>();
+    private CommandMap commandMap;
 
     public CommandManager(JavaPlugin plugin) {
         this.plugin = plugin;
         startCooldownCleanupTask();
+    }
+
+    public void registerAll() {
+        Package pkg = plugin.getClass().getPackage();
+        registerAll(pkg == null ? "" : pkg.getName());
+    }
+
+    public void registerAll(String basePackage) {
+        for (Class<?> clazz : findCommandClasses(basePackage)) {
+            try {
+                Constructor<?> constructor = clazz.getDeclaredConstructor();
+                constructor.setAccessible(true);
+
+                Object instance = constructor.newInstance();
+
+                if (!(instance instanceof CommandBase)) continue;
+
+                register((CommandBase) instance);
+            } catch (ReflectiveOperationException e) {
+                plugin.getLogger().warning(
+                        "Skipped auto-registering " + clazz.getName()
+                                + ": needs a no-args constructor (" + e.getMessage() + ")"
+                );
+            }
+        }
+    }
+
+    public void unregisterAll() {
+        if (dynamicallyRegistered.isEmpty()) return;
+
+        try {
+            CommandMap map = getCommandMap();
+            Field knownCommandsField = map.getClass().getDeclaredField("knownCommands");
+            knownCommandsField.setAccessible(true);
+
+            @SuppressWarnings("unchecked")
+            Map<String, org.bukkit.command.Command> knownCommands =
+                    (Map<String, org.bukkit.command.Command>) knownCommandsField.get(map);
+
+            for (String name : dynamicallyRegistered) {
+                org.bukkit.command.Command bukkitCommand = map.getCommand(name);
+                if (bukkitCommand != null) {
+                    bukkitCommand.unregister(map);
+                }
+                knownCommands.remove(name);
+            }
+
+            dynamicallyRegistered.clear();
+        } catch (ReflectiveOperationException e) {
+            plugin.getLogger().warning("Failed to unregister dynamic commands: " + e.getMessage());
+        }
     }
 
     public void register(CommandBase instance) {
@@ -47,9 +110,6 @@ public class CommandManager {
             );
             return;
         }
-
-        Command command = clazz.getAnnotation(Command.class);
-
 
         boolean hasSubCommands = Arrays.stream(clazz.getDeclaredMethods())
                 .anyMatch(m -> m.isAnnotationPresent(SubCommand.class));
@@ -67,9 +127,9 @@ public class CommandManager {
             if (!method.isAnnotationPresent(DefaultCommand.class)) continue;
             Command cmd = instance.getClass().getAnnotation(Command.class);
 
-            PluginCommand pc = plugin.getCommand(cmd.name());
+            PluginCommand pc = getOrCreateCommand(cmd.name(), cmd.description(), cmd.aliases());
             if (pc == null) {
-                plugin.getLogger().warning("Command " + cmd.name() + " is not defined in plugin.yml");
+                plugin.getLogger().severe("Failed to register command: " + cmd.name());
                 continue;
             }
 
@@ -142,9 +202,9 @@ public class CommandManager {
     private void registerWithSubCommand(CommandBase instance) {
         if (!instance.getClass().isAnnotationPresent(Command.class)) return;
         Command rootCommand = instance.getClass().getAnnotation(Command.class);
-        PluginCommand pc = plugin.getCommand(rootCommand.name());
+        PluginCommand pc = getOrCreateCommand(rootCommand.name(), rootCommand.description(), rootCommand.aliases());
         if (pc == null) {
-            plugin.getLogger().warning("Command " + rootCommand.name() + " is not defined in plugin.yml");
+            plugin.getLogger().severe("Failed to register command: " + rootCommand.name());
             return;
         }
 
@@ -299,6 +359,113 @@ public class CommandManager {
         });
     }
 
+    private PluginCommand getOrCreateCommand(String name, String description, String[] aliases) {
+        PluginCommand existing = plugin.getCommand(name);
+        if (existing != null) {
+            return existing;
+        }
+
+        try {
+            Constructor<PluginCommand> constructor = PluginCommand.class.getDeclaredConstructor(String.class, Plugin.class);
+            constructor.setAccessible(true);
+            PluginCommand command = constructor.newInstance(name, plugin);
+
+            if (description != null && !description.isEmpty()) {
+                command.setDescription(description);
+            }
+
+            if (aliases != null && aliases.length > 0) {
+                command.setAliases(Arrays.asList(aliases));
+            }
+
+            getCommandMap().register(plugin.getName(), command);
+            dynamicallyRegistered.add(name);
+
+            return command;
+        } catch (ReflectiveOperationException e) {
+            plugin.getLogger().severe("Failed to dynamically register command '" + name + "': " + e.getMessage());
+            return null;
+        }
+    }
+
+    private CommandMap getCommandMap() throws ReflectiveOperationException {
+        if (commandMap == null) {
+            Field field = Bukkit.getServer().getClass().getDeclaredField("commandMap");
+            field.setAccessible(true);
+            commandMap = (CommandMap) field.get(Bukkit.getServer());
+        }
+        return commandMap;
+    }
+
+    private List<Class<?>> findCommandClasses(String basePackage) {
+        List<Class<?>> found = new ArrayList<>();
+        String prefix = (basePackage == null || basePackage.isEmpty())
+                ? ""
+                : basePackage.replace('.', '/') + "/";
+
+        try {
+            URL location = plugin.getClass().getProtectionDomain().getCodeSource().getLocation();
+            File source = new File(location.toURI());
+
+            if (source.isDirectory()) {
+                scanDirectory(source, source, prefix, found);
+            } else {
+                scanJar(source, prefix, found);
+            }
+        } catch (Exception e) {
+            plugin.getLogger().severe("Failed to scan for command classes: " + e.getMessage());
+        }
+
+        return found;
+    }
+
+    private void scanJar(File jarFile, String prefix, List<Class<?>> found) throws IOException {
+        try (JarFile jar = new JarFile(jarFile)) {
+            Enumeration<JarEntry> entries = jar.entries();
+
+            while (entries.hasMoreElements()) {
+                String name = entries.nextElement().getName();
+
+                if (!name.endsWith(".class") || !name.startsWith(prefix)) continue;
+
+                tryLoadCommandClass(name.substring(0, name.length() - 6).replace('/', '.'), found);
+            }
+        }
+    }
+
+    private void scanDirectory(File root, File current, String prefix, List<Class<?>> found) {
+        File[] files = current.listFiles();
+        if (files == null) return;
+
+        for (File file : files) {
+            if (file.isDirectory()) {
+                scanDirectory(root, file, prefix, found);
+                continue;
+            }
+
+            if (!file.getName().endsWith(".class")) continue;
+
+            String relative = root.toURI().relativize(file.toURI()).getPath();
+            if (!relative.startsWith(prefix)) continue;
+
+            tryLoadCommandClass(relative.substring(0, relative.length() - 6).replace('/', '.'), found);
+        }
+    }
+
+    private void tryLoadCommandClass(String className, List<Class<?>> found) {
+        try {
+            Class<?> clazz = Class.forName(className, false, plugin.getClass().getClassLoader());
+
+            if (CommandBase.class.isAssignableFrom(clazz)
+                    && clazz != CommandBase.class
+                    && !Modifier.isAbstract(clazz.getModifiers())
+                    && clazz.isAnnotationPresent(Command.class)) {
+                found.add(clazz);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private boolean hasPermission(Set<String> perms, CommandSender sender) {
 
         for (String perm : perms) {
@@ -330,7 +497,6 @@ public class CommandManager {
         return null;
     }
 
-    @SuppressWarnings("unchecked")
     private List<String> invokeCompleter(CommandBase instance, Method method, CommandSender sender, String[] args) {
         try {
             Object result = method.invoke(instance, sender, args);
